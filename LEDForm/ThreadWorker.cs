@@ -20,6 +20,7 @@ namespace LEDForm
         private Bitmap bmp;//建立一个bitmap
         private int fpsLimit = 30;//帧率限制
         private int blocks;//分塊數量
+        private int blockCount;//每帧分块数量
         private int clipX =0, clipY = 0;
         private int rows, columns;
         //事件等待句柄
@@ -35,6 +36,8 @@ namespace LEDForm
         private long fpsTS;
         private bool gammaFlag;
         private double gamma;
+        private bool oneShot;
+        private int oneShotIndex;
  
         private byte[] Capture()//抓取屏幕指定区域并转为byte数组
         {
@@ -43,8 +46,8 @@ namespace LEDForm
                 return null;
             }
             Graphics g = Graphics.FromImage(bmp);//从bmp得到graphics，也就是在bmp上画
-            int w = bmp.Width;
-            int h = bmp.Height;
+            //int w = bmp.Width;
+            //int h = bmp.Height;
             g.CopyFromScreen(new Point(clipX, clipY), new Point(0, 0), new Size(w, h));//从屏幕将图像传输到graphics上，(源矩阵左上角，目标矩阵左上角，区块大小)
                                                                                        //clipX和clipY的值会随取景框位置变化而变化
             dataUpdateHandler?.Invoke(this, bmp);//更新screen shooter上截图信息
@@ -53,6 +56,7 @@ namespace LEDForm
 
         public void OneShot(ref System.Windows.Forms.PictureBox picture)
         {
+            oneShot = true;
             byte[] data = Capture();    //得到数组
             sendData(data);             //发送数组
             //picture.Image = bmp;
@@ -111,6 +115,7 @@ namespace LEDForm
                 {
                     lock (obj)
                     {
+                        oneShot = false;
                         taskQueue.Enqueue(Capture());//将当前的数据压入queue中
                         debugCountP += 1;
                         //Console.WriteLine("produce: " + debugCountP);
@@ -171,19 +176,52 @@ namespace LEDForm
             }
         }
 
-        private void sendData(byte[] srcData)//发送数据，将截的大数组分割成小数组并发送出去
+        private void sendData(byte[] srcData)
         {
             int totalLen = srcData.Length;
             int rowDataLen = totalLen / rows;
             int blockDataLen = rowDataLen / columns;
+            int hob = h / rows;
+            int wob = w / columns;
+            int skipLen = rowDataLen / wob;
+            int blockDataLenRow = blockDataLen / hob;
+            //Console.WriteLine("hob" + hob + " wob " + wob);
+            byte[] dstData = new byte[blockDataLen];
+            int blocklen = blockDataLen / blockCount;
+            byte[] sendData = new byte[4 + blockDataLen / blockCount];
+            sendData[0] = 0xfa;
+            sendData[1] = 0xce;
+            sendData[2] = 0;
             for (int r = 0; r < rows; r++)
             {
                 for (int c = 0; c < columns; c++)
                 {
-                    byte[] dstData = new byte[blockDataLen];
-                    int start = r * rowDataLen + c * blockDataLen;
-                    Array.Copy(srcData, start, dstData, 0, blockDataLen);
-                    sendManagers[r * c].send(dstData, gammaFlag? gamma: 1.0);//将数据发送出去
+                    int start = r * rowDataLen + c * blockDataLenRow;
+                    for (int s = 0; s < hob; s++)
+                    {
+                        Array.Copy(srcData, start + s * skipLen, dstData, blockDataLenRow * s, blockDataLenRow);
+                    }
+                    if (oneShot)
+                    {
+                        Console.WriteLine("onshot: index {0}, from {1}, blocklen {2}", oneShotIndex, oneShotIndex * blocklen,blocklen);
+                        sendData[3] = (byte)oneShotIndex;
+                        Array.Copy(dstData, oneShotIndex * blocklen, sendData, 4, blocklen);
+                        sendManagers[r * columns + c].send(sendData, gammaFlag ? gamma : 1.0);
+                        oneShotIndex++;
+                        if(oneShotIndex >= blockCount)
+                        {
+                            oneShotIndex = 0;
+                        }
+                    }
+                    else
+                    {
+                        for (int b = 0; b < blockCount; b++)
+                        {
+                            sendData[3] = (byte)b;
+                            Array.Copy(dstData, b * blocklen, sendData, 4, blocklen);
+                            sendManagers[r * columns + c].send(sendData, gammaFlag ? gamma : 1.0);
+                        }
+                    }
                 }
             }
         }
@@ -193,14 +231,20 @@ namespace LEDForm
             this.fpsLimit = 1000 / fps;
         }
 
+        int w, h;
         //设置屏幕截取范围
         public void InitClipBound(int w, int h)
         {
+            this.w = w;
+            this.h = h;
             if(bmp != null)
             {
                 bmp.Dispose();
             }
             bmp = new Bitmap(w, h);
+            int blockSize = 64 * 64;
+            blockCount = w * h / blockSize;
+            Console.WriteLine("blockCount: " + blockCount);
         }
 
         //更新截屏位置
